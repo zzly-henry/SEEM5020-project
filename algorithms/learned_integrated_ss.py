@@ -295,3 +295,4 @@ class LearnedIntegratedSpaceSaving:
     def __repr__(self) -> str:
         return (f"LearnedIntegratedSS(k={self.k}, fixed={len(self.fixed)}, "
                 f"mutable={len(self.mutable.entries)}, F1={self.get_F1()})")
+                
