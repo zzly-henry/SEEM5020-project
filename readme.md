@@ -48,7 +48,7 @@ frequency-estimation-strict-turnstile/
 ├── data_generators/
 │   ├── synthetic_zipf.py           # Zipfian streams (s = 1.0, 1.5, 2.0)
 │   ├── synthetic_uniform.py        # Uniform and Binomial streams
-│   └── real_dataset_loader.py      # CAIDA and YCSB loaders (with proxies)
+│   └── real_dataset_loader.py      # MAWI pcap loader
 ├── experiments/
 │   ├── parametric_eval.py          # Vary N and α
 │   ├── dataset_eval.py             # Diverse dataset evaluation
@@ -56,6 +56,8 @@ frequency-estimation-strict-turnstile/
 ├── utils/
 │   ├── metrics.py                  # Error metrics, HH precision/recall
 │   └── plotter.py                  # Publication-quality plots
+├── data/                           # Place 202506181400.pcap here
+│   └── 202506181400.pcap
 ├── results/                        # Auto-generated output directory
 ├── README.md
 ├── requirements.txt
@@ -104,7 +106,20 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Run all experiments
+### 2. Place the MAWI trace file
+
+The user has already downloaded the MAWI Working Group Traffic Archive trace file: **202506181400.pcap**
+
+Place it in the `data/` folder:
+
+```bash
+mkdir -p data
+cp /path/to/202506181400.pcap data/
+```
+
+If the file is not present, the dataset evaluation will skip the MAWI dataset and run only on synthetic data.
+
+### 3. Run all experiments
 
 ```bash
 chmod +x run_all_experiments.sh
@@ -117,14 +132,20 @@ Or run individually:
 # Parametric evaluation (vary N, α)
 python -m experiments.parametric_eval
 
-# Dataset evaluation (Zipf, Uniform, Binomial, CAIDA, YCSB)
+# Dataset evaluation — all datasets (synthetic + MAWI)
 python -m experiments.dataset_eval
+
+# Dataset evaluation — MAWI only with specific α
+python -m experiments.dataset_eval --dataset mawi --alpha 2.0
+
+# Dataset evaluation — synthetic only
+python -m experiments.dataset_eval --dataset synthetic
 
 # Advanced evaluation (Learned-ISS± analysis)
 python -m experiments.advanced_eval
 ```
 
-### 3. View results
+### 4. View results
 
 Results are saved to `results/` with CSV files and PNG/PDF plots:
 
@@ -163,7 +184,11 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# Run everything (generates CSVs, plots, and report)
+# Place MAWI trace in data/
+mkdir -p data
+cp /path/to/202506181400.pcap data/
+
+# Run everything
 ./run_all_experiments.sh
 
 # Or step by step:
@@ -180,25 +205,19 @@ python -m experiments.advanced_eval
 
 ### Synthetic
 
-- **Zipfian**: Generated via `data_generators/synthetic_zipf.py` with exponents s in {1.0, 1.5, 2.0}
-- **Uniform**: Generated via `data_generators/synthetic_uniform.py`
-- **Binomial**: Generated via `data_generators/synthetic_uniform.py` (binomial variant)
-
-All synthetic generators ensure strict turnstile (f_e >= 0 always) and α-bounded deletion by sampling deletions from items with positive frequency.
+- **Zipfian (Skewed)**: Generated via `data_generators/synthetic_zipf.py` with exponents s in {1.0, 1.5, 2.0}. Insertions drawn from Zipf distribution, deletions sampled uniformly from previously inserted items to satisfy α-property and strict turnstile.
+- **Uniform (Balanced)**: Generated via `data_generators/synthetic_uniform.py`. Same deletion sampling rule.
+- **Binomial (Balanced)**: Generated via `data_generators/synthetic_uniform.py` (binomial variant). Same deletion sampling rule.
 
 ### Real-World
 
-- **CAIDA Anonymized Internet Traces**
-  - Download: https://www.caida.org/catalog/datasets/passive_dataset/
-  - Place parsed CSV at `data/caida_trace.csv` (columns: timestamp, src_ip, dst_ip, ...)
-  - Element: destination IP address
-  - If file not found, a synthetic Zipfian proxy (s=1.0, 50k IPs) is used automatically.
-
-- **YCSB (Yahoo! Cloud Serving Benchmark)**
-  - Download/generate: https://github.com/brianfrankcooper/YCSB
-  - Place output at `data/ycsb_workload.csv` (columns: operation, key)
-  - Workload: 60% INSERT / 40% UPDATE
-  - If file not found, a synthetic Zipfian proxy (s=0.99, 20k keys) is used automatically.
+- **MAWI Working Group Traffic Archive**
+  - File: `202506181400.pcap`
+  - Source: https://mawi.wide.ad.jp/mawi/samplepoint-F/2025/202506181400.html
+  - Element: destination IP address extracted from each packet
+  - Each packet is treated as a +1 insertion. Deletions are then randomly sampled from previously seen items so that the stream exactly satisfies strict turnstile (f_e >= 0 always) and the chosen α-bounded deletion property.
+  - **Setup**: Place `202506181400.pcap` in the `data/` folder (or specify the full path via `--mawi-path`).
+  - Requires `dpkt` (recommended) or `scapy` to parse pcap. Install via `pip install dpkt` or `pip install scapy`.
 
 ---
 
@@ -209,10 +228,12 @@ All synthetic generators ensure strict turnstile (f_e >= 0 always) and α-bounde
 - pandas
 - matplotlib
 - seaborn
+- dpkt (recommended for pcap parsing) or scapy (fallback)
 
 Install via:
 ```bash
 pip install -r requirements.txt
+pip install dpkt   # for MAWI pcap parsing
 ```
 
 ---
@@ -237,11 +258,8 @@ pip install -r requirements.txt
 6. **Count-Sketch**:
    Charikar, M., Chen, K., & Farach-Colton, M. (2004). "Finding frequent items in data streams." Theoretical Computer Science, 312(1), 3-15.
 
-7. **CAIDA Dataset**:
-   CAIDA (2016). "The CAIDA Anonymized Internet Traces." https://www.caida.org/catalog/datasets/passive_dataset/
-
-8. **YCSB**:
-   Cooper, B. F., et al. (2010). "Benchmarking cloud serving systems with YCSB." SoCC '10.
+7. **MAWI Working Group Traffic Archive**:
+   MAWI Working Group. "MAWI Traffic Archive, Samplepoint-F." https://mawi.wide.ad.jp/mawi/
 
 ---
 
