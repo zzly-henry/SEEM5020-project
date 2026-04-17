@@ -1,14 +1,20 @@
 """
 Diverse Dataset Evaluation: test all algorithms on Zipfian, Uniform, Binomial,
-CAIDA, and YCSB datasets across multiple α values.
+and MAWI datasets across multiple α values.
 
 Produces CSV results and comparison plots.
+
+Datasets:
+  - Skewed Synthetic: Zipfian (s = 1.0, 1.5, 2.0)
+  - Balanced Synthetic: Uniform, Binomial
+  - Real-world: MAWI Working Group Traffic Archive (202506181400.pcap)
 """
 
 import os
 import sys
 import time
 import math
+import argparse
 import numpy as np
 import pandas as pd
 
@@ -24,7 +30,7 @@ from algorithms.learned_integrated_ss import LearnedIntegratedSpaceSaving
 
 from data_generators.synthetic_zipf import generate_zipf_stream
 from data_generators.synthetic_uniform import generate_uniform_stream, generate_binomial_stream
-from data_generators.real_dataset_loader import load_caida_stream, load_ycsb_stream
+from data_generators.real_dataset_loader import load_mawi_stream
 
 from utils.metrics import compute_metrics
 from utils.plotter import plot_dataset_results
@@ -48,11 +54,25 @@ OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "res
 # Dataset generators registry
 # ======================================================================
 
-def get_datasets(alpha: float, N: int = N_DEFAULT):
-    """Return dict of {dataset_name: (stream, true_freq)}."""
+def get_datasets(alpha: float, N: int = N_DEFAULT, include_mawi: bool = True,
+                 mawi_path: str = None):
+    """
+    Return dict of {dataset_name: (stream, true_freq)}.
+
+    Parameters
+    ----------
+    alpha : float
+        α-bounded deletion parameter.
+    N : int
+        Target stream length.
+    include_mawi : bool
+        Whether to include MAWI real-world dataset.
+    mawi_path : str or None
+        Path to 202506181400.pcap.
+    """
     datasets = {}
 
-    # Zipfian with different exponents
+    # Skewed Synthetic: Zipfian with different exponents
     for s in ZIPF_EXPONENTS:
         name = f"Zipf_s{s}"
         stream, freq = generate_zipf_stream(
@@ -60,25 +80,31 @@ def get_datasets(alpha: float, N: int = N_DEFAULT):
         )
         datasets[name] = (stream, freq)
 
-    # Uniform
+    # Balanced Synthetic: Uniform
     stream, freq = generate_uniform_stream(
         N=N, alpha=alpha, universe_size=UNIVERSE_SIZE, seed=SEED
     )
     datasets["Uniform"] = (stream, freq)
 
-    # Binomial
+    # Balanced Synthetic: Binomial
     stream, freq = generate_binomial_stream(
         N=N, alpha=alpha, universe_size=UNIVERSE_SIZE, seed=SEED
     )
     datasets["Binomial"] = (stream, freq)
 
-    # CAIDA (real or proxy)
-    stream, freq = load_caida_stream(N=N, alpha=alpha, seed=SEED)
-    datasets["CAIDA"] = (stream, freq)
-
-    # YCSB (real or proxy)
-    stream, freq = load_ycsb_stream(N=N, alpha=alpha, seed=SEED)
-    datasets["YCSB"] = (stream, freq)
+    # Real-world: MAWI Traffic Archive
+    if include_mawi:
+        try:
+            stream, freq = load_mawi_stream(
+                pcap_path=mawi_path, N=N, alpha=alpha, seed=SEED
+            )
+            datasets["MAWI"] = (stream, freq)
+        except FileNotFoundError as e:
+            print(f"[WARNING] {e}")
+            print("[WARNING] Skipping MAWI dataset. Place 202506181400.pcap in data/ folder.")
+        except RuntimeError as e:
+            print(f"[WARNING] {e}")
+            print("[WARNING] Skipping MAWI dataset. Install dpkt or scapy.")
 
     return datasets
 
@@ -134,17 +160,44 @@ def run_on_dataset(dataset_name: str, stream, true_freq, alpha: float) -> list:
     return results
 
 
-def run_dataset_evaluation():
+def run_dataset_evaluation(args=None):
     """Run full dataset evaluation across all α values and datasets."""
+    parser = argparse.ArgumentParser(description="Dataset evaluation for frequency estimation.")
+    parser.add_argument("--dataset", type=str, default="all",
+                        choices=["all", "synthetic", "mawi"],
+                        help="Which datasets to evaluate (default: all)")
+    parser.add_argument("--alpha", type=float, default=None,
+                        help="Single α value to test (default: test all)")
+    parser.add_argument("--N", type=int, default=N_DEFAULT,
+                        help=f"Stream length (default: {N_DEFAULT})")
+    parser.add_argument("--mawi-path", type=str, default=None,
+                        help="Path to 202506181400.pcap (default: data/202506181400.pcap)")
+    parsed = parser.parse_args(args)
+
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+    alphas = [parsed.alpha] if parsed.alpha else ALPHAS
+    include_mawi = parsed.dataset in ("all", "mawi")
+
     all_results = []
-    for alpha in ALPHAS:
+    for alpha in alphas:
         print(f"\n{'='*60}")
         print(f"α = {alpha}")
         print(f"{'='*60}")
 
-        datasets = get_datasets(alpha)
+        datasets = get_datasets(
+            alpha, N=parsed.N,
+            include_mawi=include_mawi,
+            mawi_path=parsed.mawi_path,
+        )
+
+        # If user chose "mawi" only, filter
+        if parsed.dataset == "mawi":
+            datasets = {k: v for k, v in datasets.items() if k == "MAWI"}
+            if not datasets:
+                print("[ERROR] MAWI dataset not available. Exiting.")
+                return None
+
         for ds_name, (stream, true_freq) in datasets.items():
             print(f"\n  Dataset: {ds_name}  |stream|={len(stream)}  "
                   f"F1={sum(true_freq.values())}  distinct={len(true_freq)}")

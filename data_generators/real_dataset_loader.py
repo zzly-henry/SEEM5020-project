@@ -1,172 +1,156 @@
 """
-Real-world dataset loaders for Strict Turnstile + α-Bounded Deletion streams.
+Real-world dataset loader for Strict Turnstile + α-Bounded Deletion streams.
 
-Supported datasets:
-1. CAIDA Anonymized Internet Traces – destination IP as element.
-2. YCSB (Yahoo! Cloud Serving Benchmark) – key as element, 60% insert / 40% update.
+Supported dataset:
+  MAWI Working Group Traffic Archive — destination IP as element.
+  File: 202506181400.pcap
 
-If raw data files are not available, synthetic proxies are generated that mimic
-the statistical properties (Zipfian with s≈1.0 for CAIDA, mixed workload for YCSB).
+Each packet is treated as a +1 insertion on the destination IP. Deletions are
+then sampled from previously seen items to enforce α-bounded deletion and
+strict turnstile (f_e >= 0 always).
 
-To use real data:
-  - CAIDA: download from https://www.caida.org/catalog/datasets/passive_dataset/
-    Place the parsed CSV (columns: timestamp, src_ip, dst_ip, ...) at data/caida_trace.csv
-  - YCSB: generate with https://github.com/brianfrankcooper/YCSB
-    Place output at data/ycsb_workload.csv (columns: operation, key)
+To use:
+  Place 202506181400.pcap in the data/ folder, or pass the full path.
+
+Download (if needed):
+  https://mawi.wide.ad.jp/mawi/samplepoint-F/2025/202506181400.html
 """
 
 import os
-import csv
 import numpy as np
 from typing import List, Tuple, Dict
 from collections import Counter
 
-# Default data directory
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
 
 # ======================================================================
-# CAIDA
+# MAWI pcap loader
 # ======================================================================
 
-def load_caida_stream(
-    filepath: str = None,
-    N: int = 100000,
-    alpha: float = 2.0,
-    seed: int = 42,
-) -> Tuple[List[Tuple], Dict]:
+def _read_dst_ips_from_pcap(pcap_path: str, max_packets: int = 2_000_000) -> List[str]:
     """
-    Load CAIDA trace and convert to strict-turnstile α-bounded stream.
+    Read destination IPs from a pcap file using dpkt (preferred) or scapy.
 
-    If filepath is None or file doesn't exist, generates a synthetic proxy
-    (Zipfian s=1.0 over IP-like integers) that mimics CAIDA characteristics.
+    Returns a list of destination IP strings, one per packet (up to max_packets).
+    """
+    dst_ips: List[str] = []
+
+    # Try dpkt first (faster for large pcaps)
+    try:
+        import dpkt
+        import socket
+
+        with open(pcap_path, "rb") as f:
+            try:
+                pcap_reader = dpkt.pcap.Reader(f)
+            except ValueError:
+                # Might be pcapng format
+                f.seek(0)
+                pcap_reader = dpkt.pcapng.Reader(f)
+
+            for ts, buf in pcap_reader:
+                if len(dst_ips) >= max_packets:
+                    break
+                try:
+                    eth = dpkt.ethernet.Ethernet(buf)
+                    if isinstance(eth.data, dpkt.ip.IP):
+                        ip = eth.data
+                        dst = socket.inet_ntoa(ip.dst)
+                        dst_ips.append(dst)
+                    elif isinstance(eth.data, dpkt.ip6.IP6):
+                        ip6 = eth.data
+                        dst = socket.inet_ntop(socket.AF_INET6, ip6.dst)
+                        dst_ips.append(dst)
+                except Exception:
+                    continue
+
+        if dst_ips:
+            return dst_ips
+
+    except ImportError:
+        pass
+
+    # Fallback: scapy (slower but more robust)
+    try:
+        from scapy.all import PcapReader, IP, IPv6
+        import warnings
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+        with PcapReader(pcap_path) as reader:
+            for pkt in reader:
+                if len(dst_ips) >= max_packets:
+                    break
+                if pkt.haslayer(IP):
+                    dst_ips.append(pkt[IP].dst)
+                elif pkt.haslayer(IPv6):
+                    dst_ips.append(pkt[IPv6].dst)
+
+        if dst_ips:
+            return dst_ips
+
+    except ImportError:
+        pass
+
+    if not dst_ips:
+        raise RuntimeError(
+            f"Could not read pcap file '{pcap_path}'. "
+            "Install dpkt (`pip install dpkt`) or scapy (`pip install scapy`)."
+        )
+
+    return dst_ips
+
+
+def load_mawi_stream(
+    pcap_path: str = None,
+    N: int = 500_000,
+    alpha: float = 2.0,
+    max_packets: int = 2_000_000,
+    seed: int = 42,
+) -> Tuple[List[Tuple[str, int]], Dict[str, int]]:
+    """
+    Load MAWI pcap trace and convert to a strict-turnstile α-bounded deletion stream.
+
+    Each packet → (dst_ip, +1). Deletions are sampled from accumulated items
+    to satisfy D <= (1 - 1/α) * I and f_e >= 0 at all times.
 
     Parameters
     ----------
-    filepath : str or None
-        Path to caida_trace.csv. Expected columns: any, with destination IP
-        in column index 2 (0-indexed).
+    pcap_path : str or None
+        Path to 202506181400.pcap. If None, looks in data/ folder.
     N : int
-        Target total operations.
+        Target total number of stream operations (insertions + deletions).
     alpha : float
-        α-bounded deletion parameter.
+        α-bounded deletion parameter (>= 1).
+    max_packets : int
+        Maximum packets to read from the pcap file.
     seed : int
-        Random seed.
+        Random seed for deletion sampling.
 
     Returns
     -------
-    stream : list of (element, delta)
-    true_freq : dict
+    stream : list of (dst_ip, delta) tuples
+    true_freq : dict {dst_ip: final_frequency}
     """
-    if filepath is None:
-        filepath = os.path.join(DATA_DIR, "caida_trace.csv")
+    if pcap_path is None:
+        pcap_path = os.path.join(DATA_DIR, "202506181400.pcap")
 
-    if os.path.isfile(filepath):
-        return _load_caida_real(filepath, N, alpha, seed)
-    else:
-        print(f"[INFO] CAIDA file not found at {filepath}. Using synthetic proxy (Zipf s=1.0).")
-        return _generate_caida_proxy(N, alpha, seed)
+    if not os.path.isfile(pcap_path):
+        raise FileNotFoundError(
+            f"MAWI pcap file not found at '{pcap_path}'. "
+            f"Please place 202506181400.pcap in the data/ folder or pass the full path."
+        )
 
+    print(f"[INFO] Reading MAWI pcap: {pcap_path} (max {max_packets} packets)...")
+    raw_ips = _read_dst_ips_from_pcap(pcap_path, max_packets=max_packets)
+    print(f"[INFO] Read {len(raw_ips)} destination IPs from pcap.")
 
-def _load_caida_real(filepath: str, N: int, alpha: float, seed: int):
-    """Parse real CAIDA CSV and build α-bounded turnstile stream."""
-    rng = np.random.RandomState(seed)
-    items = []
-    with open(filepath, "r") as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if len(row) >= 3:
-                items.append(row[2].strip())  # dst_ip
-            if len(items) >= N * 2:
-                break
-
-    if not items:
-        return _generate_caida_proxy(N, alpha, seed)
-
-    return _build_turnstile_stream(items, N, alpha, rng)
-
-
-def _generate_caida_proxy(N: int, alpha: float, seed: int):
-    """
-    Synthetic proxy mimicking CAIDA: Zipfian s=1.0 over 50k distinct IPs.
-    """
-    from data_generators.synthetic_zipf import generate_zipf_stream
-    return generate_zipf_stream(N=N, alpha=alpha, s=1.0, universe_size=50000, seed=seed)
+    # Build α-bounded turnstile stream
+    return _build_turnstile_stream(raw_ips, N, alpha, np.random.RandomState(seed))
 
 
 # ======================================================================
-# YCSB
-# ======================================================================
-
-def load_ycsb_stream(
-    filepath: str = None,
-    N: int = 100000,
-    alpha: float = 2.0,
-    seed: int = 42,
-) -> Tuple[List[Tuple], Dict]:
-    """
-    Load YCSB workload and convert to strict-turnstile α-bounded stream.
-
-    YCSB default: 60% INSERT, 40% UPDATE (treated as read-modify-write,
-    modeled as delete-then-insert of same key).
-
-    If file not found, generates a synthetic proxy with 60/40 split and
-    Zipfian key distribution (matching YCSB's default requestdistribution).
-
-    Parameters
-    ----------
-    filepath : str or None
-        Path to ycsb_workload.csv. Expected columns: operation, key.
-    N : int
-        Target total operations.
-    alpha : float
-        α-bounded deletion parameter.
-    seed : int
-        Random seed.
-    """
-    if filepath is None:
-        filepath = os.path.join(DATA_DIR, "ycsb_workload.csv")
-
-    if os.path.isfile(filepath):
-        return _load_ycsb_real(filepath, N, alpha, seed)
-    else:
-        print(f"[INFO] YCSB file not found at {filepath}. Using synthetic proxy.")
-        return _generate_ycsb_proxy(N, alpha, seed)
-
-
-def _load_ycsb_real(filepath: str, N: int, alpha: float, seed: int):
-    """Parse real YCSB output."""
-    rng = np.random.RandomState(seed)
-    items = []
-    with open(filepath, "r") as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if len(row) >= 2:
-                op = row[0].strip().upper()
-                key = row[1].strip()
-                if op in ("INSERT", "UPDATE", "READ"):
-                    items.append(key)
-            if len(items) >= N * 2:
-                break
-
-    if not items:
-        return _generate_ycsb_proxy(N, alpha, seed)
-
-    return _build_turnstile_stream(items, N, alpha, rng)
-
-
-def _generate_ycsb_proxy(N: int, alpha: float, seed: int):
-    """
-    Synthetic YCSB proxy: Zipfian s=0.99 (YCSB default), 20k keys.
-    The 60/40 insert/update split naturally produces deletions when
-    updates are modeled as delete+insert cycles.
-    """
-    from data_generators.synthetic_zipf import generate_zipf_stream
-    return generate_zipf_stream(N=N, alpha=alpha, s=0.99, universe_size=20000, seed=seed)
-
-
-# ======================================================================
-# Shared utility
+# Turnstile stream builder (shared logic)
 # ======================================================================
 
 def _build_turnstile_stream(
@@ -180,7 +164,7 @@ def _build_turnstile_stream(
     α-bounded deletion stream of ~N operations.
 
     Strategy: treat raw items as insertions, then sample deletions from
-    accumulated frequencies to satisfy α-property.
+    accumulated frequencies to satisfy the α-property.
     """
     if alpha <= 1.0:
         deletion_ratio = 0.0
@@ -190,7 +174,6 @@ def _build_turnstile_stream(
     num_inserts = min(int(N / (1.0 + deletion_ratio)), len(raw_items))
     num_deletes = min(N - num_inserts, int(deletion_ratio * num_inserts))
 
-    # Use first num_inserts raw items
     insert_items = raw_items[:num_inserts]
 
     stream: List[Tuple] = []
@@ -214,8 +197,8 @@ def _build_turnstile_stream(
                 pos_counts = np.array([current_freq[it] for it in pos_items], dtype=np.float64)
                 pos_probs = pos_counts / pos_counts.sum()
                 n_del = min(deletes_remaining, len(pos_items), batch_size)
-                del_items = rng.choice(len(pos_items), size=n_del, p=pos_probs, replace=True)
-                for idx in del_items:
+                del_indices = rng.choice(len(pos_items), size=n_del, p=pos_probs, replace=True)
+                for idx in del_indices:
                     item = pos_items[idx]
                     if current_freq[item] > 0 and deletes_remaining > 0:
                         stream.append((item, -1))
