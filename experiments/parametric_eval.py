@@ -6,6 +6,7 @@ Produces CSV results and plots for:
   - Relative error vs α
   - Space vs α
   - Update time vs N
+  
 """
 
 import os
